@@ -65,7 +65,7 @@ fun BlockBlastGame() {
 
     val colors = listOf(
         Color(0xFF00E5FF), Color(0xFFFF5252), Color(0xFFFFD740),
-        Color(0xFF69F0AE), Color(0xFFE040FB)
+        Color(0xFF69F0AE), Color(0xFFE040FB), Color(0xFFFF4081), Color(0xFF448AFF)
     )
 
     var trayPieces by remember { mutableStateOf(generateTray(colors)) }
@@ -76,14 +76,18 @@ fun BlockBlastGame() {
     var grabOffset by remember { mutableStateOf(Offset.Zero) }
     var gridOrigin by remember { mutableStateOf(Offset.Zero) }
 
+    // Для магнитного прилипания
+    var snappedTopLeft by remember { mutableStateOf<Offset?>(null) }
+
     val density = LocalDensity.current
     val stepPx = with(density) { (cellSizeDp + spacingDp).toPx() }
+    // Высота, на которую фигура поднимается над пальцем
+    val liftOffsetPx = with(density) { 100.dp.toPx() }
 
     var previewRow by remember { mutableIntStateOf(-1) }
     var previewCol by remember { mutableIntStateOf(-1) }
     var isPreviewValid by remember { mutableStateOf(false) }
 
-    // Функция для сброса игры
     fun resetGame() {
         board = Array(boardSize) { arrayOfNulls(boardSize) }
         score = 0
@@ -97,7 +101,7 @@ fun BlockBlastGame() {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.SpaceBetween
         ) {
-            // Верхняя панель (Счет и Рекорд)
+            // Верхняя панель
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("BLOCK BLAST", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
                 Row(
@@ -122,13 +126,13 @@ fun BlockBlastGame() {
                 trayPieces = trayPieces,
                 onDragStart = { piece, fingerAbsPos, localGrabOffset ->
                     draggedPiece = piece
-                    dragPosition = fingerAbsPos
+                    // Поднимаем фигуру над пальцем для удобства
+                    dragPosition = fingerAbsPos - Offset(0f, liftOffsetPx)
                     grabOffset = localGrabOffset
                 },
                 onDrag = { dragAmount ->
-
-                    val boostedDrag = Offset(dragAmount.x, dragAmount.y * 1.3f)
-                    dragPosition += boostedDrag
+                    // Убрали ускорение, теперь движение 1 к 1 с пальцем
+                    dragPosition += dragAmount
 
                     draggedPiece?.let { piece ->
                         val topLeftX = dragPosition.x - grabOffset.x
@@ -136,12 +140,23 @@ fun BlockBlastGame() {
                         val relativeX = topLeftX - gridOrigin.x
                         val relativeY = topLeftY - gridOrigin.y
 
+                        // Округляем до ближайшей клетки (делает установку очень щедрой и удобной)
                         val col = (relativeX / stepPx).roundToInt()
                         val row = (relativeY / stepPx).roundToInt()
 
                         previewRow = row
                         previewCol = col
                         isPreviewValid = row != -1 && col != -1 && canPlacePiece(board, piece, row, col)
+
+                        // МАГНИТНОЕ ПРИЛИПАНИЕ: если можно поставить, запоминаем точные координаты
+                        if (isPreviewValid) {
+                            snappedTopLeft = Offset(
+                                gridOrigin.x + col * stepPx,
+                                gridOrigin.y + row * stepPx
+                            )
+                        } else {
+                            snappedTopLeft = null
+                        }
                     }
                 },
                 onDragEnd = {
@@ -153,41 +168,32 @@ fun BlockBlastGame() {
                         board = newBoard
                         score += linesCleared * 10
 
-                        // Обновляем рекорд, если побили
                         if (score > highScore) {
                             highScore = score
                             prefs.edit().putInt("high_score", highScore).apply()
                         }
 
-                        // Убираем фигуру из лотка
                         val newTray = trayPieces.filter { it != piece }
-
                         if (newTray.isEmpty()) {
-                            // Если фигуры кончились, генерируем новые
                             val generatedTray = generateTray(colors)
                             trayPieces = generatedTray
-                            // Проверяем, можно ли поставить новые фигуры
-                            if (!canAnyPieceBePlaced(board, generatedTray)) {
-                                isGameOver = true
-                            }
+                            if (!canAnyPieceBePlaced(board, generatedTray)) isGameOver = true
                         } else {
                             trayPieces = newTray
-                            // Проверяем оставшиеся фигуры
-                            if (!canAnyPieceBePlaced(board, newTray)) {
-                                isGameOver = true
-                            }
+                            if (!canAnyPieceBePlaced(board, newTray)) isGameOver = true
                         }
                     }
                     draggedPiece = null
                     previewRow = -1
                     previewCol = -1
+                    snappedTopLeft = null
                 }
             )
         }
 
         // Летящая фигура
         draggedPiece?.let { piece ->
-            DraggedPieceOverlay(piece, dragPosition, grabOffset)
+            DraggedPieceOverlay(piece, dragPosition, grabOffset, snappedTopLeft)
         }
 
         // Экран Game Over
@@ -199,29 +205,48 @@ fun BlockBlastGame() {
 
 // --- ЛОГИКА ---
 
-// Проверка: можно ли поставить ХОТЯ БЫ ОДНУ фигуру из списка куда-либо на поле
 fun canAnyPieceBePlaced(board: Array<Array<Color?>>, pieces: List<Piece>): Boolean {
     for (piece in pieces) {
         for (r in 0 until 8) {
             for (c in 0 until 8) {
-                if (canPlacePiece(board, piece, r, c)) {
-                    return true // Нашли место, игра продолжается
-                }
+                if (canPlacePiece(board, piece, r, c)) return true
             }
         }
     }
-    return false // Ни одну фигуру поставить нельзя - Game Over
+    return false
 }
 
 fun generateTray(colors: List<Color>): List<Piece> {
+    // ТЕПЕРЬ ЗДЕСЬ ВСЕ КЛАССИЧЕСКИЕ ФИГУРЫ
     val shapes = listOf(
-        listOf(listOf(1)),
-        listOf(listOf(1, 1, 1)),
-        listOf(listOf(1, 1), listOf(1, 1)),
-        listOf(listOf(1, 0), listOf(1, 1)),
-        listOf(listOf(1, 1, 1), listOf(0, 1, 0)),
-        listOf(listOf(1, 0), listOf(1, 1), listOf(0, 1)),
-        listOf(listOf(1, 1, 1), listOf(1, 1, 1), listOf(1, 1, 1)) // Большой квадрат для сложности
+        listOf(listOf(1)), // 1x1
+        listOf(listOf(1, 1)), // 1x2 горизонт
+        listOf(listOf(1), listOf(1)), // 1x2 вертик
+        listOf(listOf(1, 1, 1)), // 1x3 горизонт
+        listOf(listOf(1), listOf(1), listOf(1)), // 1x3 вертик
+        listOf(listOf(1, 1, 1, 1)), // 1x4 горизонт
+        listOf(listOf(1), listOf(1), listOf(1), listOf(1)), // 1x4 вертик
+
+        listOf(listOf(1, 1), listOf(1, 1)), // 2x2 квадрат
+
+        listOf(listOf(1, 1, 1), listOf(0, 1, 0)), // T-образная
+        listOf(listOf(0, 1, 0), listOf(1, 1, 1)), // T перевернутая
+        listOf(listOf(1, 0), listOf(1, 1), listOf(1, 0)), // T влево
+        listOf(listOf(0, 1), listOf(1, 1), listOf(0, 1)), // T вправо
+
+        listOf(listOf(1, 1, 1), listOf(1, 0, 0)), // L-образная
+        listOf(listOf(1, 1, 1), listOf(0, 0, 1)), // J-образная
+        listOf(listOf(1, 0), listOf(1, 0), listOf(1, 1)), // L вертик
+        listOf(listOf(0, 1), listOf(0, 1), listOf(1, 1)), // J вертик
+        listOf(listOf(1, 1), listOf(1, 0), listOf(1, 0)), // Г вертик
+        listOf(listOf(1, 1), listOf(0, 1), listOf(0, 1)), // Г вертик зеркальная
+
+        listOf(listOf(1, 1, 0), listOf(0, 1, 1)), // S-образная
+        listOf(listOf(0, 1, 1), listOf(1, 1, 0)), // Z-образная
+        listOf(listOf(1, 0), listOf(1, 1), listOf(0, 1)), // S вертик
+        listOf(listOf(0, 1), listOf(1, 1), listOf(1, 0)), // Z вертик
+
+        listOf(listOf(1, 1, 1), listOf(1, 1, 1), listOf(1, 1, 1)) // 3x3 (сложная)
     )
     return List(3) { Piece(shapes.random(), colors.random()) }
 }
@@ -266,10 +291,7 @@ fun clearLines(board: Array<Array<Color?>>): Pair<Array<Array<Color?>>, Int> {
 @Composable
 fun GameOverScreen(score: Int, highScore: Int, onRestart: () -> Unit) {
     Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black.copy(alpha = 0.85f))
-            .zIndex(20f),
+        modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.85f)).zIndex(20f),
         contentAlignment = Alignment.Center
     ) {
         Card(
@@ -283,7 +305,6 @@ fun GameOverScreen(score: Int, highScore: Int, onRestart: () -> Unit) {
             ) {
                 Text("ИГРА ОКОНЧЕНА", color = Color(0xFFFF5252), fontSize = 28.sp, fontWeight = FontWeight.Bold)
                 Spacer(modifier = Modifier.height(24.dp))
-
                 Text("Твой счет: $score", color = Color.White, fontSize = 22.sp)
                 Text(
                     text = if (score >= highScore) "Новый рекорд! 🎉" else "Рекорд: $highScore",
@@ -292,9 +313,7 @@ fun GameOverScreen(score: Int, highScore: Int, onRestart: () -> Unit) {
                     modifier = Modifier.padding(top = 8.dp),
                     textAlign = TextAlign.Center
                 )
-
                 Spacer(modifier = Modifier.height(32.dp))
-
                 Button(
                     onClick = onRestart,
                     modifier = Modifier.fillMaxWidth().height(50.dp),
@@ -327,11 +346,15 @@ fun GameBoard(
                     for (c in 0 until 8) {
                         val cellColor = board[r][c]
                         val isPreview = draggedPiece != null && isCellInPreview(r, c, previewRow, previewCol, draggedPiece)
-                        val prevColor = if (isPreviewValid) draggedPiece?.color ?: Color.White else Color.Red
 
-                        if (cellColor != null) FilledCell(size = cellSizeDp, color = cellColor)
-                        else if (isPreview) FilledCell(size = cellSizeDp, color = prevColor.copy(alpha = 0.5f))
-                        else EmptyCell(size = cellSizeDp)
+                        if (cellColor != null) {
+                            FilledCell(size = cellSizeDp, color = cellColor)
+                        } else if (isPreview && isPreviewValid) {
+                            // Показываем подсветку ТОЛЬКО если можно поставить (убрали красный)
+                            FilledCell(size = cellSizeDp, color = draggedPiece!!.color.copy(alpha = 0.4f))
+                        } else {
+                            EmptyCell(size = cellSizeDp)
+                        }
                     }
                 }
             }
@@ -418,13 +441,19 @@ fun DraggablePiece(
 }
 
 @Composable
-fun DraggedPieceOverlay(piece: Piece, dragPosition: Offset, grabOffset: Offset) {
-    val topLeftX = dragPosition.x - grabOffset.x
-    val topLeftY = dragPosition.y - grabOffset.y
+fun DraggedPieceOverlay(
+    piece: Piece,
+    dragPosition: Offset,
+    grabOffset: Offset,
+    snappedTopLeft: Offset?
+) {
+    // ЕСЛИ ЕСТЬ МАГНИТНОЕ ПРИЛИПАНИЕ, РИСУЕМ РОВНО ПО СЕТКЕ, ИНАЧЕ ЗА ПАЛЬЦЕМ
+    val renderX = snappedTopLeft?.x ?: (dragPosition.x - grabOffset.x)
+    val renderY = snappedTopLeft?.y ?: (dragPosition.y - grabOffset.y)
 
     Column(
         modifier = Modifier
-            .offset { IntOffset(topLeftX.roundToInt(), topLeftY.roundToInt()) }
+            .offset { IntOffset(renderX.roundToInt(), renderY.roundToInt()) }
             .zIndex(10f),
         verticalArrangement = Arrangement.spacedBy(spacingDp)
     ) {
