@@ -18,7 +18,6 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import kotlinx.coroutines.delay
 import kotlin.random.Random
 
 class MainActivity : ComponentActivity() {
@@ -61,10 +60,20 @@ fun MainAppRouter() {
     var noSound by remember { mutableStateOf(prefs.getBoolean("no_sound", false)) }
     var isRandomBg by remember { mutableStateOf(prefs.getBoolean("random_bg", true)) }
     var isTrayAnimEnabled by remember { mutableStateOf(prefs.getBoolean("tray_anim", true)) }
+    var isFallingBgEnabled by remember { mutableStateOf(prefs.getBoolean("falling_bg", false)) }
+
     var currentTrackIndex by remember { mutableIntStateOf(-1) }
 
     var showSettings by remember { mutableStateOf(false) }
     var showAuthors by remember { mutableStateOf(false) }
+    var showStats by remember { mutableStateOf(false) } // НОВОЕ: Показ статистики
+
+    // Читаем актуальный рекорд и статистику
+    val highScore = remember(currentScreen, showStats) { prefs.getInt("high_score", 0) }
+    val bestScoreRevive = remember(showStats) { prefs.getInt("best_score_revive", 0) }
+    val bestScoreNoRevive = remember(showStats) { prefs.getInt("best_score_no_revive", 0) }
+    val totalRevives = remember(showStats) { prefs.getInt("total_revives_spent", 0) }
+    val totalPlayTime = remember(showStats) { prefs.getLong("total_play_time", 0L) }
 
     val allMusicResources = listOf(R.raw.music_bg1, R.raw.music_bg2, R.raw.music_bg3, R.raw.music_bg4, R.raw.music_bg5)
     var currentPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
@@ -136,9 +145,11 @@ fun MainAppRouter() {
                 Screen.MENU -> {
                     MenuScreen(
                         isDarkTheme = isDarkTheme,
+                        highScore = highScore,
                         onPlayClick = { currentScreen = Screen.GAME },
                         onSettingsClick = { showSettings = true },
-                        onAuthorsClick = { showAuthors = true }
+                        onAuthorsClick = { showAuthors = true },
+                        onHighScoreClick = { showStats = true } // Передаем клик
                     )
                 }
                 Screen.GAME -> {
@@ -147,6 +158,9 @@ fun MainAppRouter() {
                         isDarkTheme = isDarkTheme,
                         isRandomBg = isRandomBg,
                         isTrayAnimEnabled = isTrayAnimEnabled,
+                        isFallingBgEnabled = isFallingBgEnabled,
+                        noSound = noSound,
+                        onToggleSound = { noSound = !noSound; prefs.edit().putBoolean("no_sound", noSound).apply() },
                         onScoreUpdated = { newScore -> checkAndPlayMusic(newScore) },
                         onGameReset = { triggeredMilestones = emptySet() },
                         onBackToMenu = { currentScreen = Screen.MENU }
@@ -159,13 +173,14 @@ fun MainAppRouter() {
     if (showSettings) {
         SettingsDialog(
             isRandomColor = isRandomColor, isDarkTheme = isDarkTheme, noSound = noSound, isRandomBg = isRandomBg,
-            isTrayAnimEnabled = isTrayAnimEnabled,
+            isTrayAnimEnabled = isTrayAnimEnabled, isFallingBgEnabled = isFallingBgEnabled,
             currentTrackNumber = if (currentTrackIndex == -1) 0 else currentTrackIndex + 1,
             onRandomColorChange = { newValue -> isRandomColor = newValue; prefs.edit().putBoolean("random_color", newValue).apply() },
             onThemeChange = { newValue -> isDarkTheme = newValue; prefs.edit().putBoolean("dark_theme", newValue).apply() },
             onSoundChange = { newValue -> noSound = newValue; prefs.edit().putBoolean("no_sound", newValue).apply() },
             onRandomBgChange = { newValue -> isRandomBg = newValue; prefs.edit().putBoolean("random_bg", newValue).apply() },
             onTrayAnimChange = { newValue -> isTrayAnimEnabled = newValue; prefs.edit().putBoolean("tray_anim", newValue).apply() },
+            onFallingBgChange = { newValue -> isFallingBgEnabled = newValue; prefs.edit().putBoolean("falling_bg", newValue).apply() },
             onNextMusicClick = { playNextTrackInCircle() },
             onDismiss = { showSettings = false }
         )
@@ -173,5 +188,17 @@ fun MainAppRouter() {
 
     if (showAuthors) {
         AuthorsDialog(isDarkTheme = isDarkTheme, onDismiss = { showAuthors = false })
+    }
+
+    // НОВЫЙ ДИАЛОГ СТАТИСТИКИ
+    if (showStats) {
+        StatsDialog(
+            isDarkTheme = isDarkTheme,
+            bestScoreRevive = bestScoreRevive,
+            bestScoreNoRevive = bestScoreNoRevive,
+            totalRevives = totalRevives,
+            totalPlayTime = totalPlayTime,
+            onDismiss = { showStats = false }
+        )
     }
 }
