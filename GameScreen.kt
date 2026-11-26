@@ -1,21 +1,22 @@
 package com.example.mobilegame
 
-import android.content.Context
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
-import androidx.compose.material3.*
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -24,15 +25,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -46,36 +45,54 @@ import kotlin.random.Random
 
 @Composable
 fun BlockBlastGame(
+    storage: GameStorage,
     isRandomColor: Boolean,
     isDarkTheme: Boolean,
     isRandomBg: Boolean,
     isTrayAnimEnabled: Boolean,
     isFallingBgEnabled: Boolean,
     noSound: Boolean,
+    blockSkin: BlockSkin,
+    startMode: StartMode,
+    isEndlessMode: Boolean,
+    fallingBgSpeedMult: Float,
+    storyBgSignal: Long,
     onToggleSound: () -> Unit,
     onScoreUpdated: (Int) -> Unit,
     onGameReset: () -> Unit,
     onBackToMenu: () -> Unit
 ) {
-    val context = LocalContext.current
-    val prefs = remember { context.getSharedPreferences("game_prefs", Context.MODE_PRIVATE) }
     val scope = rememberCoroutineScope()
     val lifecycleOwner = LocalLifecycleOwner.current
-
     val textColor = if (isDarkTheme) Color.White else Color(0xFF1A1A1A)
 
-    val savedState = remember { loadGameState(context) }
+    val savedState = remember { storage.loadGameState() }
     val boardSize = 8
 
-    var board by remember { mutableStateOf(savedState?.first ?: Array(boardSize) { arrayOfNulls<Color>(boardSize) }) }
-    var score by remember { mutableIntStateOf(savedState?.second ?: 0) }
-    var trayPieces by remember { mutableStateOf<List<Piece?>>(savedState?.third ?: generateTray(GAME_COLORS, 64)) }
+    val initialBoard = remember {
+        savedState?.board ?: if (startMode == StartMode.ARCADE) {
+            generateArcadeBoard()
+        } else {
+            Array(boardSize) { arrayOfNulls<Color>(boardSize) }
+        }
+    }
+    val initialTray = remember {
+        savedState?.tray ?: if (isEndlessMode || startMode == StartMode.ARCADE) {
+            generateSolvableTray(initialBoard)
+        } else {
+            generateTray(GAME_COLORS, 64)
+        }
+    }
 
-    var highScore by remember { mutableIntStateOf(prefs.getInt("high_score", 0)) }
+    var board by remember { mutableStateOf(initialBoard) }
+    var score by remember { mutableIntStateOf(savedState?.score ?: 0) }
+    var trayPieces by remember { mutableStateOf(initialTray) }
+
+    var highScore by remember { mutableIntStateOf(storage.highScore) }
     var isGameOver by remember { mutableStateOf(false) }
-    var hasUsedRevive by remember { mutableStateOf(prefs.getBoolean("has_used_revive", false)) }
+    var hasUsedRevive by remember { mutableStateOf(savedState?.hasUsedRevive ?: false) }
 
-    var lives by remember { mutableIntStateOf(prefs.getInt("lives", 0)) }
+    var lives by remember { mutableIntStateOf(storage.lives) }
     var showReviveDialog by remember { mutableStateOf(false) }
     var promoCodeText by remember { mutableStateOf("") }
 
@@ -90,93 +107,123 @@ fun BlockBlastGame(
     var droppingPos by remember { mutableStateOf(Offset.Zero) }
     var droppingGrabOffset by remember { mutableStateOf(Offset.Zero) }
 
-    // ТАЙМЕР ИГРЫ
     var sessionStartTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    var lastActionTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
 
-    val bgColors = listOf(
-        if (isDarkTheme) Color(0xFF121212) else Color(0xFFE8F0F8),
-        if (isDarkTheme) Color(0xFF1A1C29) else Color(0xFFE0E5EC),
-        if (isDarkTheme) Color(0xFF1C1A1C) else Color(0xFFECE0E0),
-        if (isDarkTheme) Color(0xFF0E1A18) else Color(0xFFE0ECE5),
-        if (isDarkTheme) Color(0xFF211818) else Color(0xFFF5E6E6)
-    )
-    var currentBg by remember { mutableStateOf(bgColors[0]) }
+    val bgColors = remember(isDarkTheme) {
+        if (isDarkTheme) {
+            listOf(Color(0xFF121212), Color(0xFF1A1C29), Color(0xFF1C1A1C), Color(0xFF0E1A18), Color(0xFF211818))
+        } else {
+            listOf(Color(0xFFE8F0F8), Color(0xFFE0E5EC), Color(0xFFECE0E0), Color(0xFFE0ECE5), Color(0xFFF5E6E6))
+        }
+    }
+    var currentBgIndex by remember { mutableIntStateOf(0) }
+    var lastBgMilestone by remember { mutableIntStateOf((savedState?.score ?: 0) / 50) }
+    val currentBg = bgColors[currentBgIndex % bgColors.size]
 
     val density = LocalDensity.current
     val stepPx = with(density) { (cellSizeDp + spacingDp).toPx() }
+    val spacingPx = with(density) { spacingDp.toPx() }
     val liftOffsetPx = with(density) { 160.dp.toPx() }
 
     var previewRow by remember { mutableIntStateOf(-1) }
     var previewCol by remember { mutableIntStateOf(-1) }
     var isPreviewValid by remember { mutableStateOf(false) }
 
+    val animatedSpeedMult by animateFloatAsState(
+        targetValue = fallingBgSpeedMult,
+        animationSpec = tween(2000, easing = FastOutSlowInEasing),
+        label = "bg_speed_anim"
+    )
+
     LaunchedEffect(score) {
-        if (score > 0 && isRandomBg && score >= 50 && (score % 50 < 8)) {
-            currentBg = bgColors.random()
+        val milestone = score / 50
+        if (isRandomBg && milestone > lastBgMilestone) {
+            lastBgMilestone = milestone
+            currentBgIndex = (currentBgIndex + Random.nextInt(1, bgColors.size)) % bgColors.size
         }
         onScoreUpdated(score)
+    }
+
+    LaunchedEffect(storyBgSignal) {
+        if (storyBgSignal > 0L) {
+            currentBgIndex = (currentBgIndex + Random.nextInt(1, bgColors.size)) % bgColors.size
+        }
+    }
+
+    fun updatePlayTime() {
+        val now = System.currentTimeMillis()
+        val activeEndTime = minOf(now, lastActionTime + 60000L)
+        val activeDuration = activeEndTime - sessionStartTime
+        if (activeDuration > 0) {
+            storage.totalPlayTime += activeDuration
+        }
+        sessionStartTime = now
+        lastActionTime = now
     }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_PAUSE) {
-                saveGameState(context, board, score, trayPieces, isGameOver)
-                // Сохраняем время
-                val currentTotal = prefs.getLong("total_play_time", 0L)
-                prefs.edit().putLong("total_play_time", currentTotal + (System.currentTimeMillis() - sessionStartTime)).apply()
-                sessionStartTime = System.currentTimeMillis()
+                storage.saveGameState(board, score, trayPieces, isGameOver, hasUsedRevive)
+                updatePlayTime()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
-            saveGameState(context, board, score, trayPieces, isGameOver)
-            val currentTotal = prefs.getLong("total_play_time", 0L)
-            prefs.edit().putLong("total_play_time", currentTotal + (System.currentTimeMillis() - sessionStartTime)).apply()
+            storage.saveGameState(board, score, trayPieces, isGameOver, hasUsedRevive)
+            updatePlayTime()
         }
     }
 
     fun resetGame() {
-        board = Array(boardSize) { arrayOfNulls(boardSize) }
+        if (startMode == StartMode.ARCADE) {
+            val newBoard = generateArcadeBoard()
+            board = newBoard
+            trayPieces = generateSolvableTray(newBoard)
+        } else {
+            val newBoard = Array(boardSize) { arrayOfNulls<Color>(boardSize) }
+            board = newBoard
+            trayPieces = if (isEndlessMode) generateSolvableTray(newBoard) else generateTray(GAME_COLORS, 64)
+        }
         score = 0
-        trayPieces = generateTray(GAME_COLORS, 64)
+        lastBgMilestone = 0
         isGameOver = false
         showReviveDialog = false
         hasUsedRevive = false
-        prefs.edit().putBoolean("has_used_revive", false).apply()
+        storage.clearSavedGame()
         onGameReset()
-        prefs.edit().putBoolean("has_saved_game", false).apply()
     }
 
     fun revive() {
         if (lives > 0) {
             lives--
-            prefs.edit().putInt("lives", lives).apply()
-            // Считаем потраченные жизни
-            prefs.edit().putInt("total_revives_spent", prefs.getInt("total_revives_spent", 0) + 1).apply()
+            storage.lives = lives
+            storage.totalRevivesSpent += 1
 
             val newBoard = board.map { it.clone() }.toTypedArray()
-            for (r in 0 until 8) for (c in 0 until 8) if (Random.nextBoolean()) newBoard[r][c] = null
+            for (r in 0 until 8) {
+                for (c in 0 until 8) {
+                    if (Random.nextBoolean()) newBoard[r][c] = null
+                }
+            }
             board = newBoard
-            trayPieces = generateTray(GAME_COLORS, 64)
+            trayPieces = generateSolvableTray(newBoard)
             isGameOver = false
             showReviveDialog = false
             hasUsedRevive = true
-            prefs.edit().putBoolean("has_used_revive", true).apply()
-            prefs.edit().putBoolean("has_saved_game", false).apply()
+            storage.saveGameState(board, score, trayPieces, isGameOver = false, hasUsedRevive = true)
         }
     }
 
     fun saveStatsOnGameOver() {
-        // Обновляем статистику лучших счетов
-        if (hasUsedRevive) {
-            if (score > prefs.getInt("best_score_revive", 0)) {
-                prefs.edit().putInt("best_score_revive", score).apply()
-            }
+        if (isEndlessMode) {
+            if (score > storage.bestScoreEndless) storage.bestScoreEndless = score
+        } else if (hasUsedRevive) {
+            if (score > storage.bestScoreRevive) storage.bestScoreRevive = score
         } else {
-            if (score > prefs.getInt("best_score_no_revive", 0)) {
-                prefs.edit().putInt("best_score_no_revive", score).apply()
-            }
+            if (score > storage.bestScoreNoRevive) storage.bestScoreNoRevive = score
         }
     }
 
@@ -190,7 +237,7 @@ fun BlockBlastGame(
 
         if (score > highScore) {
             highScore = score
-            prefs.edit().putInt("high_score", highScore).apply()
+            storage.highScore = highScore
         }
 
         if (linesCleared > 0) {
@@ -213,31 +260,36 @@ fun BlockBlastGame(
                 if (!canAnyPieceBePlaced(board, trayPieces)) {
                     isGameOver = true
                     saveStatsOnGameOver()
-                    prefs.edit().putBoolean("has_saved_game", false).apply()
                 }
-                saveGameState(context, board, score, trayPieces, isGameOver)
+                storage.saveGameState(board, score, trayPieces, isGameOver, hasUsedRevive)
             }
         } else {
             board = actualBoard
             if (!canAnyPieceBePlaced(board, trayPieces)) {
                 isGameOver = true
                 saveStatsOnGameOver()
-                prefs.edit().putBoolean("has_saved_game", false).apply()
             }
-            saveGameState(context, board, score, trayPieces, isGameOver)
+            storage.saveGameState(board, score, trayPieces, isGameOver, hasUsedRevive)
         }
     }
 
     fun executePlacement(p: Piece, targetRow: Int, targetCol: Int, currentDragPos: Offset, currentGrab: Offset) {
+        lastActionTime = System.currentTimeMillis()
+
         val tempBoardForTray = board.map { it.clone() }.toTypedArray()
         placePiece(tempBoardForTray, p, targetRow, targetCol)
-        val freeCells = tempBoardForTray.flatten().count { it == null }
+        val (boardAfterClear, _, _) = clearLinesWithCoords(tempBoardForTray)
+        val freeCells = boardAfterClear.flatten().count { it == null }
 
         val mutableTray = trayPieces.toMutableList()
         val pIndex = mutableTray.indexOfFirst { it?.id == p.id }
         if (pIndex != -1) mutableTray[pIndex] = null
 
-        trayPieces = if (mutableTray.all { it == null }) generateTray(GAME_COLORS, freeCells) else mutableTray
+        trayPieces = if (mutableTray.all { it == null }) {
+            if (isEndlessMode) generateSolvableTray(boardAfterClear) else generateTray(GAME_COLORS, freeCells)
+        } else {
+            mutableTray
+        }
 
         val targetTopLeft = Offset(gridOrigin.x + targetCol * stepPx, gridOrigin.y + targetRow * stepPx)
         val startTopLeft = Offset(currentDragPos.x - currentGrab.x, currentDragPos.y - currentGrab.y)
@@ -268,7 +320,11 @@ fun BlockBlastGame(
 
     Box(modifier = Modifier.fillMaxSize().background(currentBg)) {
         if (isFallingBgEnabled) {
-            FallingBackground(modifier = Modifier.fillMaxSize(), isDarkTheme = isDarkTheme)
+            FallingBackground(
+                modifier = Modifier.fillMaxSize(),
+                isDarkTheme = isDarkTheme,
+                speedMult = animatedSpeedMult
+            )
         }
 
         Column(
@@ -277,9 +333,16 @@ fun BlockBlastGame(
             verticalArrangement = Arrangement.SpaceBetween
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     IconButton(
-                        onClick = { saveGameState(context, board, score, trayPieces, isGameOver); onBackToMenu() },
+                        onClick = {
+                            storage.saveGameState(board, score, trayPieces, isGameOver, hasUsedRevive)
+                            onBackToMenu()
+                        },
                         modifier = Modifier.background(if (isDarkTheme) Color(0xFF2C2C2C) else Color(0xFFD1D5DB), shape = CircleShape).size(48.dp)
                     ) {
                         Icon(Icons.Default.Home, contentDescription = "Меню", tint = textColor)
@@ -315,13 +378,18 @@ fun BlockBlastGame(
                 isPreviewValid = isPreviewValid,
                 draggedPiece = draggedPiece,
                 animatingCells = animatingCells,
-                onGridPositioned = { offset -> gridOrigin = offset }
+                onGridPositioned = { offset -> gridOrigin = offset },
+                skin = blockSkin,
+                isDarkTheme = isDarkTheme
             )
 
             val itemsToShow = if (isTrayAnimEnabled) trayPieces.filterNotNull() else trayPieces
 
-            androidx.compose.foundation.lazy.LazyRow(
-                modifier = Modifier.fillMaxWidth().height(140.dp).background(if (isDarkTheme) Color(0xFF1E1E1E) else Color(0xFFE4E7EB), RoundedCornerShape(16.dp)),
+            LazyRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(140.dp)
+                    .background(if (isDarkTheme) Color(0xFF1E1E1E) else Color(0xFFE4E7EB), RoundedCornerShape(16.dp)),
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically,
                 userScrollEnabled = false
@@ -334,21 +402,35 @@ fun BlockBlastGame(
                         var boxPos by remember { mutableStateOf(Offset.Zero) }
                         val isBeingDragged = draggedPiece?.id == piece.id
 
-                        val itemScale by animateFloatAsState(targetValue = if (isBeingDragged) 0.75f else 1f, animationSpec = spring(dampingRatio = 0.7f, stiffness = Spring.StiffnessMediumLow), label = "tray_item_scale")
-                        val itemAlpha by animateFloatAsState(targetValue = if (isBeingDragged) 0.25f else 1f, animationSpec = tween(250), label = "tray_item_alpha")
-                        val animModifier = if (isTrayAnimEnabled) Modifier.animateItem(fadeInSpec = tween(300), placementSpec = spring(dampingRatio = 0.75f, stiffness = Spring.StiffnessLow), fadeOutSpec = tween(200)) else Modifier
+                        val itemScale by animateFloatAsState(
+                            targetValue = if (isBeingDragged) 0.75f else 1f,
+                            animationSpec = spring(dampingRatio = 0.7f, stiffness = Spring.StiffnessMediumLow),
+                            label = "tray_item_scale"
+                        )
+                        val itemAlpha by animateFloatAsState(
+                            targetValue = if (isBeingDragged) 0.25f else 1f,
+                            animationSpec = tween(250),
+                            label = "tray_item_alpha"
+                        )
+                        val animModifier = if (isTrayAnimEnabled) {
+                            Modifier.animateItem(
+                                fadeInSpec = tween(300),
+                                placementSpec = spring(dampingRatio = 0.75f, stiffness = Spring.StiffnessLow),
+                                fadeOutSpec = tween(200)
+                            )
+                        } else Modifier
 
                         Box(
                             modifier = animModifier
                                 .width(105.dp)
                                 .fillMaxHeight()
                                 .onGloballyPositioned { boxPos = it.positionInRoot() }
-                                .pointerInput(piece) {
+                                .pointerInput(piece, blockSkin, isDarkTheme) {
                                     detectDragGestures(
                                         onDragStart = { localOffset ->
                                             val absTouch = boxPos + localOffset
-                                            val pw = piece.cols * cellSizeDp.value * 2
-                                            val ph = piece.rows * cellSizeDp.value * 2
+                                            val pw = piece.cols * stepPx - spacingPx
+                                            val ph = piece.rows * stepPx - spacingPx
                                             val grab = Offset(pw / 2f, ph / 2f)
                                             draggedPiece = piece
                                             dragPosition = absTouch - Offset(0f, liftOffsetPx)
@@ -366,8 +448,9 @@ fun BlockBlastGame(
                                                 previewRow = row
                                                 previewCol = col
                                                 isPreviewValid = row != -1 && col != -1 && canPlacePiece(board, currentPiece, row, col)
-
-                                                snappedTopLeft = if (isPreviewValid) Offset(gridOrigin.x + col * stepPx, gridOrigin.y + row * stepPx) else null
+                                                snappedTopLeft = if (isPreviewValid) {
+                                                    Offset(gridOrigin.x + col * stepPx, gridOrigin.y + row * stepPx)
+                                                } else null
                                             }
                                         },
                                         onDragEnd = {
@@ -397,12 +480,14 @@ fun BlockBlastGame(
                                 },
                             contentAlignment = Alignment.Center
                         ) {
-                            Box(modifier = Modifier.graphicsLayer {
-                                scaleX = itemScale
-                                scaleY = itemScale
-                                alpha = itemAlpha
-                            }) {
-                                AnimatedPieceWrapper(piece)
+                            Box(
+                                modifier = Modifier.graphicsLayer {
+                                    scaleX = itemScale
+                                    scaleY = itemScale
+                                    alpha = itemAlpha
+                                }
+                            ) {
+                                AnimatedPieceWrapper(piece, blockSkin, isDarkTheme)
                             }
                         }
                     }
@@ -410,8 +495,8 @@ fun BlockBlastGame(
             }
         }
 
-        draggedPiece?.let { piece -> DraggedPieceOverlay(piece, dragPosition, grabOffset, snappedTopLeft) }
-        droppingPiece?.let { piece -> DraggedPieceOverlay(piece, droppingPos, droppingGrabOffset, null) }
+        draggedPiece?.let { piece -> DraggedPieceOverlay(piece, dragPosition, grabOffset, snappedTopLeft, blockSkin, isDarkTheme) }
+        droppingPiece?.let { piece -> DraggedPieceOverlay(piece, droppingPos, droppingGrabOffset, null, blockSkin, isDarkTheme) }
 
         floatingScores.forEach { fs ->
             key(fs.id) {
@@ -440,26 +525,38 @@ fun BlockBlastGame(
                     color = Color(0xFFFFD740).copy(alpha = alpha),
                     fontSize = 36.sp,
                     fontWeight = FontWeight.Black,
-                    modifier = Modifier.offset { IntOffset(fs.x.roundToInt(), (fs.y + offsetY).roundToInt()) }.graphicsLayer {
-                        scaleX = scale
-                        scaleY = scale
-                        rotationZ = rotation
-                    }.zIndex(20f)
+                    modifier = Modifier
+                        .offset { IntOffset(fs.x.roundToInt(), (fs.y + offsetY).roundToInt()) }
+                        .graphicsLayer {
+                            scaleX = scale
+                            scaleY = scale
+                            rotationZ = rotation
+                        }
+                        .zIndex(20f)
                 )
             }
         }
 
         if (isGameOver) {
             GameOverDialog(
-                score = score, highScore = highScore, isDarkTheme = isDarkTheme,
+                score = score,
+                highScore = highScore,
+                startMode = startMode,
+                isEndlessMode = isEndlessMode,
+                isDarkTheme = isDarkTheme,
                 hasUsedRevive = hasUsedRevive,
-                onRestart = { resetGame() }, onReviveClick = { showReviveDialog = true }, onBackToMenu = { onBackToMenu() }
+                onRestart = { resetGame() },
+                onReviveClick = { showReviveDialog = true },
+                onBackToMenu = { onBackToMenu() }
             )
         }
 
         if (showReviveDialog) {
             ReviveDialog(
-                lives = lives, isDarkTheme = isDarkTheme, promoCodeText = promoCodeText, onPromoCodeChange = { promoCodeText = it },
+                lives = lives,
+                isDarkTheme = isDarkTheme,
+                promoCodeText = promoCodeText,
+                onPromoCodeChange = { promoCodeText = it },
                 onActivatePromo = {
                     val code = promoCodeText.trim().lowercase()
                     when (code) {
@@ -470,10 +567,12 @@ fun BlockBlastGame(
                         "777" -> lives += 3
                         "8888" -> lives += 5
                     }
-                    prefs.edit().putInt("lives", lives).apply()
+                    storage.lives = lives
                     promoCodeText = ""
                 },
-                onRevive = { revive() }, onBackToMenu = { showReviveDialog = false; onBackToMenu() }, onDismiss = { showReviveDialog = false }
+                onRevive = { revive() },
+                onBackToMenu = { showReviveDialog = false; onBackToMenu() },
+                onDismiss = { showReviveDialog = false }
             )
         }
     }
@@ -481,12 +580,21 @@ fun BlockBlastGame(
 
 @Composable
 fun GameBoard(
-    board: Array<Array<Color?>>, previewRow: Int, previewCol: Int, isPreviewValid: Boolean,
-    draggedPiece: Piece?, animatingCells: Set<Pair<Int, Int>>, onGridPositioned: (Offset) -> Unit
+    board: Array<Array<Color?>>,
+    previewRow: Int,
+    previewCol: Int,
+    isPreviewValid: Boolean,
+    draggedPiece: Piece?,
+    animatingCells: Set<Pair<Int, Int>>,
+    onGridPositioned: (Offset) -> Unit,
+    skin: BlockSkin,
+    isDarkTheme: Boolean
 ) {
     Box(
-        modifier = Modifier.background(Color(0xFF000000), shape = RoundedCornerShape(12.dp))
-            .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(12.dp)).padding(8.dp)
+        modifier = Modifier
+            .background(Color(0xFF000000), shape = RoundedCornerShape(12.dp))
+            .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(12.dp))
+            .padding(8.dp)
     ) {
         Column(
             modifier = Modifier.onGloballyPositioned { onGridPositioned(it.positionInRoot()) },
@@ -502,13 +610,16 @@ fun GameBoard(
                         Box(modifier = Modifier.size(cellSizeDp)) {
                             EmptyCell(size = cellSizeDp)
                             if (cellColor != null) {
-                                BoardCell(color = cellColor, isClearing = isClearing)
+                                BoardCell(color = cellColor, isClearing = isClearing, skin = skin, isDarkTheme = isDarkTheme)
                             } else if (isPreview && isPreviewValid) {
-                                Box(
-                                    Modifier.size(cellSizeDp)
-                                        .background(draggedPiece!!.color.copy(alpha = 0.4f), RoundedCornerShape(6.dp))
-                                        .border(1.dp, Color.White.copy(alpha = 0.1f), RoundedCornerShape(6.dp))
-                                )
+                                Box(Modifier.size(cellSizeDp).graphicsLayer { alpha = 0.5f }) {
+                                    SkinBlock(
+                                        color = draggedPiece!!.color,
+                                        skin = skin,
+                                        isDarkTheme = isDarkTheme,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
                             }
                         }
                     }
@@ -519,24 +630,33 @@ fun GameBoard(
 }
 
 @Composable
-fun EmptyCell(size: androidx.compose.ui.unit.Dp) {
-    Box(Modifier.size(size).background(Color(0xFF121212), RoundedCornerShape(6.dp)).border(1.dp, Color(0xFF222222), RoundedCornerShape(6.dp)))
-}
-
-@Composable
-fun BoardCell(color: Color, isClearing: Boolean) {
-    val animatedColor by animateColorAsState(targetValue = color, animationSpec = tween(400), label = "color")
-    val scale by animateFloatAsState(targetValue = if (isClearing) 0f else 1f, animationSpec = tween(350, easing = FastOutSlowInEasing), label = "scale")
-    val rotation by animateFloatAsState(targetValue = if (isClearing) 90f else 0f, animationSpec = tween(350), label = "rotation")
-
+fun EmptyCell(size: Dp) {
     Box(
-        modifier = Modifier.size(cellSizeDp).graphicsLayer { scaleX = scale; scaleY = scale; rotationZ = rotation }
-            .background(animatedColor, RoundedCornerShape(6.dp)).border(2.dp, Color.White.copy(alpha = 0.3f), RoundedCornerShape(6.dp))
+        Modifier
+            .size(size)
+            .background(Color(0xFF121212), RoundedCornerShape(6.dp))
+            .border(1.dp, Color(0xFF222222), RoundedCornerShape(6.dp))
     )
 }
 
 @Composable
-fun AnimatedPieceWrapper(piece: Piece) {
+fun BoardCell(color: Color, isClearing: Boolean, skin: BlockSkin, isDarkTheme: Boolean) {
+    val animatedColor by animateColorAsState(targetValue = color, animationSpec = tween(400), label = "color")
+    val scale by animateFloatAsState(targetValue = if (isClearing) 0f else 1f, animationSpec = tween(350, easing = FastOutSlowInEasing), label = "scale")
+    val rotation by animateFloatAsState(targetValue = if (isClearing) 90f else 0f, animationSpec = tween(350), label = "rotation")
+
+    Box(modifier = Modifier.size(cellSizeDp).graphicsLayer { scaleX = scale; scaleY = scale; rotationZ = rotation }) {
+        SkinBlock(
+            color = animatedColor,
+            skin = skin,
+            isDarkTheme = isDarkTheme,
+            modifier = Modifier.fillMaxSize()
+        )
+    }
+}
+
+@Composable
+fun AnimatedPieceWrapper(piece: Piece, skin: BlockSkin, isDarkTheme: Boolean) {
     val scale = remember { Animatable(0.3f) }
     val rotation = remember { Animatable(-45f) }
 
@@ -546,19 +666,28 @@ fun AnimatedPieceWrapper(piece: Piece) {
     }
 
     Box(modifier = Modifier.graphicsLayer { scaleX = scale.value; scaleY = scale.value; rotationZ = rotation.value }) {
-        DraggablePieceVisual(piece)
+        DraggablePieceVisual(piece, skin, isDarkTheme)
     }
 }
 
 @Composable
-fun DraggablePieceVisual(piece: Piece) {
+fun DraggablePieceVisual(piece: Piece, skin: BlockSkin, isDarkTheme: Boolean) {
     val previewCellSize = 24.dp
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         for (r in 0 until piece.rows) {
             Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                 for (c in 0 until piece.cols) {
                     if (piece.shape[r][c] == 1) {
-                        Box(Modifier.size(previewCellSize).background(piece.color, RoundedCornerShape(4.dp)).border(1.dp, Color.White.copy(alpha = 0.3f), RoundedCornerShape(4.dp)))
+                        Box(Modifier.size(previewCellSize)) {
+                            SkinBlock(
+                                color = piece.color,
+                                skin = skin,
+                                isDarkTheme = isDarkTheme,
+                                modifier = Modifier.fillMaxSize(),
+                                cornerRadius = 4.dp,
+                                borderWidth = 1.dp
+                            )
+                        }
                     } else {
                         Spacer(modifier = Modifier.size(previewCellSize))
                     }
@@ -569,21 +698,28 @@ fun DraggablePieceVisual(piece: Piece) {
 }
 
 @Composable
-fun DraggedPieceOverlay(piece: Piece, dragPosition: Offset, grabOffset: Offset, snappedTopLeft: Offset?) {
+fun DraggedPieceOverlay(
+    piece: Piece,
+    dragPosition: Offset,
+    grabOffset: Offset,
+    snappedTopLeft: Offset?,
+    skin: BlockSkin,
+    isDarkTheme: Boolean
+) {
     val renderX = dragPosition.x - grabOffset.x
     val renderY = dragPosition.y - grabOffset.y
 
     Column(
-        modifier = Modifier
-            .offset { IntOffset(renderX.roundToInt(), renderY.roundToInt()) }
-            .zIndex(10f),
+        modifier = Modifier.offset { IntOffset(renderX.roundToInt(), renderY.roundToInt()) }.zIndex(10f),
         verticalArrangement = Arrangement.spacedBy(spacingDp)
     ) {
         for (r in 0 until piece.rows) {
             Row(horizontalArrangement = Arrangement.spacedBy(spacingDp)) {
                 for (c in 0 until piece.cols) {
                     if (piece.shape[r][c] == 1) {
-                        Box(Modifier.size(cellSizeDp).background(piece.color, RoundedCornerShape(6.dp)).border(2.dp, Color.White.copy(alpha = 0.3f), RoundedCornerShape(6.dp)))
+                        Box(Modifier.size(cellSizeDp)) {
+                            SkinBlock(color = piece.color, skin = skin, isDarkTheme = isDarkTheme, modifier = Modifier.fillMaxSize())
+                        }
                     } else {
                         Spacer(modifier = Modifier.size(cellSizeDp))
                     }
@@ -622,267 +758,7 @@ fun AnimatedScore(targetScore: Int, textColor: Color) {
                 displayScore = (displayScore + step.toInt()).coerceAtMost(targetScore)
                 delay(25)
             }
-        } else {
-            displayScore = targetScore
-        }
+        } else displayScore = targetScore
     }
     Text("$displayScore", color = textColor, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-}
-
-@Composable
-fun GameOverDialog(score: Int, highScore: Int, isDarkTheme: Boolean, hasUsedRevive: Boolean, onRestart: () -> Unit, onReviveClick: () -> Unit, onBackToMenu: () -> Unit) {
-    val textColor = if (isDarkTheme) Color.White else Color(0xFF1A1A1A)
-    PremiumDialog(isDarkTheme, onDismiss = onBackToMenu) {
-        Text("ИГРА ОКОНЧЕНА", color = Color(0xFFFF5252), fontSize = 28.sp, fontWeight = FontWeight.Black, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
-
-        if (hasUsedRevive) {
-            Text(
-                "Был возрождён",
-                color = Color(0xFFFFD740),
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(top = 8.dp).fillMaxWidth(),
-                textAlign = TextAlign.Center
-            )
-        }
-
-        Spacer(modifier = Modifier.height(24.dp))
-        Text("Твой счет", color = textColor.copy(alpha = 0.7f), fontSize = 16.sp, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
-        Text("$score", color = textColor, fontSize = 36.sp, fontWeight = FontWeight.Bold, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
-        Text(text = if (score >= highScore) "Новый рекорд!" else "Рекорд: $highScore", color = Color(0xFFFFD740), fontSize = 18.sp, modifier = Modifier.padding(top = 8.dp).fillMaxWidth(), textAlign = TextAlign.Center, fontWeight = FontWeight.Bold)
-        Spacer(modifier = Modifier.height(32.dp))
-        Button(onClick = onReviveClick, modifier = Modifier.fillMaxWidth().height(50.dp), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF69F0AE)), shape = RoundedCornerShape(12.dp)) {
-            Text("ВТОРАЯ ЖИЗНЬ", color = Color.Black, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-        }
-        Spacer(modifier = Modifier.height(12.dp))
-        Button(onClick = onRestart, modifier = Modifier.fillMaxWidth().height(50.dp), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00E5FF)), shape = RoundedCornerShape(12.dp)) {
-            Text("НАЧАТЬ ЗАНОВО", color = Color.Black, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-        }
-        Spacer(modifier = Modifier.height(12.dp))
-        TextButton(onClick = onBackToMenu, modifier = Modifier.fillMaxWidth()) { Text("В МЕНЮ", color = textColor.copy(alpha = 0.7f), fontSize = 16.sp) }
-    }
-}
-
-// ОБНОВЛЕННЫЙ ДИАЛОГ ВОЗРОЖДЕНИЯ
-@Composable
-fun ReviveDialog(
-    lives: Int, isDarkTheme: Boolean, promoCodeText: String, onPromoCodeChange: (String) -> Unit, onActivatePromo: () -> Unit,
-    onRevive: () -> Unit, onBackToMenu: () -> Unit, onDismiss: () -> Unit
-) {
-    val textColor = if (isDarkTheme) Color.White else Color(0xFF1A1A1A)
-
-    // Список валидных промокодов
-    val validCodes = listOf("даша", "алиса", "паша", "2026", "777", "8888")
-    val isCodeValid = validCodes.contains(promoCodeText.trim().lowercase())
-
-    PremiumDialog(isDarkTheme, onDismiss) {
-        // Счетчик жизней в верхнем правом углу
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("Возрождение", color = textColor, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-
-            // Плашка со счетчиком
-            Row(
-                modifier = Modifier
-                    .background(Color(0xFFFF5252).copy(alpha = 0.15f), RoundedCornerShape(50))
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(Icons.Default.Favorite, contentDescription = "Жизни", tint = Color(0xFFFF5252), modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("$lives", color = Color(0xFFFF5252), fontSize = 16.sp, fontWeight = FontWeight.Black)
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        OutlinedTextField(
-            value = promoCodeText, onValueChange = onPromoCodeChange, label = { Text("Промокод", color = textColor.copy(alpha = 0.5f)) },
-            modifier = Modifier.fillMaxWidth(), singleLine = true,
-            colors = OutlinedTextFieldDefaults.colors(focusedTextColor = textColor, unfocusedTextColor = textColor, focusedBorderColor = Color(0xFF00E5FF), unfocusedBorderColor = textColor.copy(alpha = 0.3f))
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // Кнопка меняет цвет, если код валидный
-        Button(
-            onClick = onActivatePromo,
-            modifier = Modifier.fillMaxWidth().height(40.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = if (isCodeValid) Color(0xFF69F0AE) else Color(0xFF2C2C2C)
-            ),
-            shape = RoundedCornerShape(8.dp)
-        ) {
-            Text(
-                "Активировать",
-                color = if (isCodeValid) Color.Black else Color.White,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Bold
-            )
-        }
-
-        Spacer(modifier = Modifier.height(24.dp))
-        Button(onClick = onRevive, enabled = lives > 0, modifier = Modifier.fillMaxWidth().height(50.dp), colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF69F0AE), disabledContainerColor = Color.Gray), shape = RoundedCornerShape(12.dp)) {
-            Text("ВОЗРОДИТЬСЯ", color = Color.Black, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-        }
-        Spacer(modifier = Modifier.height(12.dp))
-        TextButton(onClick = onBackToMenu, modifier = Modifier.fillMaxWidth()) { Text("ВЫЙТИ В ГЛАВНОЕ МЕНЮ", color = textColor.copy(alpha = 0.7f), fontSize = 16.sp) }
-    }
-}
-
-fun saveGameState(context: Context, board: Array<Array<Color?>>, score: Int, trayPieces: List<Piece?>, isGameOver: Boolean) {
-    val prefs = context.getSharedPreferences("game_prefs", Context.MODE_PRIVATE)
-    if (isGameOver) { prefs.edit().putBoolean("has_saved_game", false).apply(); return }
-    val boardStr = board.joinToString(";") { row -> row.joinToString(",") { it?.toArgb()?.toString() ?: "null" } }
-    val trayStr = trayPieces.joinToString(";") { piece ->
-        if (piece == null) "null"
-        else {
-            val shapeStr = piece.shape.joinToString("|") { it.joinToString(",") }
-            "$shapeStr:${piece.color.toArgb()}"
-        }
-    }
-    prefs.edit().putBoolean("has_saved_game", true).putInt("saved_score", score).putString("saved_board", boardStr).putString("saved_tray", trayStr).apply()
-}
-
-fun loadGameState(context: Context): Triple<Array<Array<Color?>>, Int, List<Piece?>>? {
-    val prefs = context.getSharedPreferences("game_prefs", Context.MODE_PRIVATE)
-    if (!prefs.getBoolean("has_saved_game", false)) return null
-    val boardStr = prefs.getString("saved_board", null) ?: return null
-    val trayStr = prefs.getString("saved_tray", null) ?: return null
-    val score = prefs.getInt("saved_score", 0)
-    val board = Array(8) { arrayOfNulls<Color>(8) }
-    try {
-        val rows = boardStr.split(";")
-        for (r in 0 until 8) {
-            val cols = rows[r].split(",")
-            for (c in 0 until 8) { if (cols[c] != "null") board[r][c] = Color(cols[c].toInt()) }
-        }
-        val trayPieces = mutableListOf<Piece?>()
-        if (trayStr.isNotEmpty()) {
-            val pieces = trayStr.split(";")
-            for (p in pieces) {
-                if (p == "null") {
-                    trayPieces.add(null)
-                } else {
-                    val parts = p.split(":")
-                    val shapeRows = parts[0].split("|")
-                    val shape = shapeRows.map { row -> row.split(",").map { it.toInt() } }
-                    val color = Color(parts[1].toInt())
-                    trayPieces.add(Piece(shape = shape, color = color))
-                }
-            }
-        }
-        return Triple(board, score, trayPieces)
-    } catch (e: Exception) { return null }
-}
-
-fun changeBoardColors(board: Array<Array<Color?>>, isRandom: Boolean): Array<Array<Color?>> {
-    val newBoard = Array(8) { arrayOfNulls<Color>(8) }
-    for (r in 0 until 8) {
-        for (c in 0 until 8) {
-            val currentColor = board[r][c]
-            if (currentColor != null) {
-                if (isRandom) newBoard[r][c] = GAME_COLORS.random()
-                else {
-                    val currentIndex = GAME_COLORS.indexOf(currentColor)
-                    newBoard[r][c] = if (currentIndex != -1) GAME_COLORS[(currentIndex + 1) % GAME_COLORS.size] else GAME_COLORS.random()
-                }
-            }
-        }
-    }
-    return newBoard
-}
-
-fun clearLinesWithCoords(board: Array<Array<Color?>>): Triple<Array<Array<Color?>>, Int, Set<Pair<Int, Int>>> {
-    val clearedCoords = mutableSetOf<Pair<Int, Int>>()
-    val fullRows = mutableListOf<Int>()
-    val fullCols = mutableListOf<Int>()
-
-    for (r in 0 until 8) {
-        if (board[r].all { it != null }) {
-            fullRows.add(r)
-        }
-    }
-    for (c in 0 until 8) {
-        if ((0 until 8).all { board[it][c] != null }) {
-            fullCols.add(c)
-        }
-    }
-
-    val totalLinesCleared = fullRows.size + fullCols.size
-
-    if (totalLinesCleared > 0) {
-        for (r in fullRows) {
-            for (c in 0 until 8) clearedCoords.add(Pair(r, c))
-        }
-        for (c in fullCols) {
-            for (r in 0 until 8) clearedCoords.add(Pair(r, c))
-        }
-    }
-
-    val newBoard = Array(8) { arrayOfNulls<Color>(8) }
-    for (r in 0 until 8) {
-        for (c in 0 until 8) {
-            if (!clearedCoords.contains(Pair(r, c))) {
-                newBoard[r][c] = board[r][c]
-            }
-        }
-    }
-
-    return Triple(newBoard, totalLinesCleared, clearedCoords)
-}
-
-fun canAnyPieceBePlaced(board: Array<Array<Color?>>, pieces: List<Piece?>): Boolean {
-    val validPieces = pieces.filterNotNull()
-    for (piece in validPieces) {
-        for (r in 0 until 8) {
-            for (c in 0 until 8) {
-                if (canPlacePiece(board, piece, r, c)) return true
-            }
-        }
-    }
-    return false
-}
-
-fun generateTray(colors: List<Color>, freeCells: Int): List<Piece?> {
-    val shapes = mutableListOf(
-        listOf(listOf(1)), listOf(listOf(1, 1)), listOf(listOf(1), listOf(1)),
-        listOf(listOf(1, 1, 1)), listOf(listOf(1), listOf(1), listOf(1)),
-        listOf(listOf(1, 1, 1, 1)), listOf(listOf(1), listOf(1), listOf(1), listOf(1)),
-        listOf(listOf(1, 1), listOf(1, 1)),
-        listOf(listOf(0, 1), listOf(1, 0)), listOf(listOf(1, 0), listOf(0, 1)),
-        listOf(listOf(1, 1, 1), listOf(0, 1, 0)), listOf(listOf(0, 1, 0), listOf(1, 1, 1)),
-        listOf(listOf(1, 0), listOf(1, 1), listOf(1, 0)), listOf(listOf(0, 1), listOf(1, 1), listOf(0, 1)),
-        listOf(listOf(1, 1, 1), listOf(1, 0, 0)), listOf(listOf(1, 1, 1), listOf(0, 0, 1)),
-        listOf(listOf(1, 0), listOf(1, 0), listOf(1, 1)), listOf(listOf(0, 1), listOf(0, 1), listOf(1, 1)),
-        listOf(listOf(1, 1), listOf(1, 0), listOf(1, 0)), listOf(listOf(1, 1), listOf(0, 1), listOf(0, 1)),
-        listOf(listOf(1, 1, 0), listOf(0, 1, 1)), listOf(listOf(0, 1, 1), listOf(1, 1, 0)),
-        listOf(listOf(1, 0), listOf(1, 1), listOf(0, 1)), listOf(listOf(0, 1), listOf(1, 1), listOf(1, 0)),
-        listOf(listOf(1, 1, 1), listOf(1, 1, 1), listOf(1, 1, 1))
-    )
-    if (freeCells < 32) {
-        shapes.add(listOf(listOf(1)))
-        shapes.add(listOf(listOf(1)))
-        shapes.add(listOf(listOf(1)))
-    }
-    return List(3) { Piece(shape = shapes.random(), color = colors.random()) }
-}
-
-fun canPlacePiece(board: Array<Array<Color?>>, piece: Piece, row: Int, col: Int): Boolean {
-    if (row < 0 || col < 0 || row + piece.rows > 8 || col + piece.cols > 8) return false
-    for (r in 0 until piece.rows) for (c in 0 until piece.cols) if (piece.shape[r][c] == 1 && board[row + r][col + c] != null) return false
-    return true
-}
-
-fun placePiece(board: Array<Array<Color?>>, piece: Piece, row: Int, col: Int) {
-    for (r in 0 until piece.rows) for (c in 0 until piece.cols) if (piece.shape[r][c] == 1) board[row + r][col + c] = piece.color
-}
-
-fun isCellInPreview(r: Int, c: Int, pr: Int, pc: Int, piece: Piece): Boolean {
-    if (pr == -1 || pc == -1) return false
-    val relR = r - pr
-    val relC = c - pc
-    return relR in 0 until piece.rows && relC in 0 until piece.cols && piece.shape[relR][relC] == 1
 }

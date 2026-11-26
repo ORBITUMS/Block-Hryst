@@ -1,7 +1,5 @@
 package com.example.mobilegame
 
-import android.content.Context
-import android.media.MediaPlayer
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -15,7 +13,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import kotlin.random.Random
@@ -31,109 +28,70 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-val GAME_COLORS = listOf(
-    Color(0xFF00E5FF), Color(0xFFFF5252), Color(0xFFFFD740),
-    Color(0xFF69F0AE), Color(0xFFE040FB), Color(0xFFFF4081), Color(0xFF448AFF)
-)
-
-data class Piece(val id: Int = Random.nextInt(), val shape: List<List<Int>>, val color: Color) {
-    val rows = shape.size
-    val cols = shape[0].size
-}
-
-data class FloatingScore(val id: Long = System.nanoTime(), val text: String, val x: Float, val y: Float)
-
-val cellSizeDp = 36.dp
-val spacingDp = 4.dp
-
-enum class Screen { MENU, GAME }
-
 @Composable
 fun MainAppRouter() {
-    var currentScreen by remember { mutableStateOf(Screen.MENU) }
     val context = LocalContext.current
-    val prefs = remember { context.getSharedPreferences("game_prefs", Context.MODE_PRIVATE) }
     val lifecycleOwner = LocalLifecycleOwner.current
+    val storage = remember { GameStorage(context) }
+    val musicManager = remember { MusicManager(context) }
 
-    var isRandomColor by remember { mutableStateOf(prefs.getBoolean("random_color", true)) }
-    var isDarkTheme by remember { mutableStateOf(prefs.getBoolean("dark_theme", true)) }
-    var noSound by remember { mutableStateOf(prefs.getBoolean("no_sound", false)) }
-    var isRandomBg by remember { mutableStateOf(prefs.getBoolean("random_bg", true)) }
-    var isTrayAnimEnabled by remember { mutableStateOf(prefs.getBoolean("tray_anim", true)) }
-    var isFallingBgEnabled by remember { mutableStateOf(prefs.getBoolean("falling_bg", false)) }
+    var currentScreen by remember { mutableStateOf(Screen.MENU) }
 
-    var currentTrackIndex by remember { mutableIntStateOf(-1) }
+    var isRandomColor by remember { mutableStateOf(storage.isRandomColor) }
+    var isDarkTheme by remember { mutableStateOf(storage.isDarkTheme) }
+    var noSound by remember { mutableStateOf(storage.noSound) }
+    var isRandomBg by remember { mutableStateOf(storage.isRandomBg) }
+    var isTrayAnimEnabled by remember { mutableStateOf(storage.isTrayAnimEnabled) }
+    var isFallingBgEnabled by remember { mutableStateOf(storage.isFallingBgEnabled) }
+    var fallingBgSpeed by remember { mutableFloatStateOf(storage.fallingBgSpeed) }
+    var blockSkin by remember { mutableStateOf(storage.blockSkin) }
+    var startMode by remember { mutableStateOf(storage.startMode) }
+    var isStoryMode by remember { mutableStateOf(storage.isStoryMode) }
+    var isEndlessMode by remember { mutableStateOf(storage.isEndlessMode) }
+
+    // Временные переопределения для Режима Сюжета
+    var storySkin by remember { mutableStateOf<BlockSkin?>(null) }
+    var storyRandomColors by remember { mutableStateOf<Boolean?>(null) }
+    var storySpeedMult by remember { mutableFloatStateOf(1f) }
+    var storyBgSignal by remember { mutableLongStateOf(0L) }
+    var lastStoryMilestone by remember { mutableIntStateOf(0) }
+
+    val effectiveSkin = if (isStoryMode) storySkin ?: blockSkin else blockSkin
+    val effectiveRandomColor = if (isStoryMode) storyRandomColors ?: isRandomColor else isRandomColor
+    val effectiveFallingSpeedMult = if (isStoryMode) fallingBgSpeed * storySpeedMult else fallingBgSpeed
 
     var showSettings by remember { mutableStateOf(false) }
     var showAuthors by remember { mutableStateOf(false) }
-    var showStats by remember { mutableStateOf(false) } // НОВОЕ: Показ статистики
+    var showStats by remember { mutableStateOf(false) }
 
-    // Читаем актуальный рекорд и статистику
-    val highScore = remember(currentScreen, showStats) { prefs.getInt("high_score", 0) }
-    val bestScoreRevive = remember(showStats) { prefs.getInt("best_score_revive", 0) }
-    val bestScoreNoRevive = remember(showStats) { prefs.getInt("best_score_no_revive", 0) }
-    val totalRevives = remember(showStats) { prefs.getInt("total_revives_spent", 0) }
-    val totalPlayTime = remember(showStats) { prefs.getLong("total_play_time", 0L) }
+    val highScore = remember(currentScreen, showStats) { storage.highScore }
+    val bestScoreRevive = remember(showStats) { storage.bestScoreRevive }
+    val bestScoreNoRevive = remember(showStats) { storage.bestScoreNoRevive }
+    val bestScoreEndless = remember(showStats) { storage.bestScoreEndless }
+    val totalRevives = remember(showStats) { storage.totalRevivesSpent }
+    val totalPlayTime = remember(showStats) { storage.totalPlayTime }
 
-    val allMusicResources = listOf(R.raw.music_bg1, R.raw.music_bg2, R.raw.music_bg3, R.raw.music_bg4, R.raw.music_bg5)
-    var currentPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
-    var musicLockoutUntil by remember { mutableLongStateOf(0L) }
-    var triggeredMilestones by remember { mutableStateOf(setOf<Int>()) }
-
-    fun stopMusic() {
-        currentPlayer?.release()
-        currentPlayer = null
-    }
-
-    fun playNextTrackInCircle() {
-        if (noSound) return
-        stopMusic()
-        currentTrackIndex = (currentTrackIndex + 1) % allMusicResources.size
-        try {
-            val resId = allMusicResources[currentTrackIndex]
-            currentPlayer = MediaPlayer.create(context, resId)?.apply {
-                isLooping = true
-                start()
-            }
-            musicLockoutUntil = System.currentTimeMillis() + 5 * 60 * 1000
-        } catch (e: Exception) { e.printStackTrace() }
-    }
-
-    fun checkAndPlayMusic(currentScore: Int) {
-        if (noSound) return
-        val milestones = listOf(50, 100, 200, 300, 400)
-        val newlyReached = milestones.filter { currentScore >= it && !triggeredMilestones.contains(it) }
-
-        if (newlyReached.isNotEmpty()) {
-            triggeredMilestones = triggeredMilestones + newlyReached
-            if (currentPlayer?.isPlaying != true && Random.nextFloat() <= 0.8f && System.currentTimeMillis() > musicLockoutUntil) {
-                playNextTrackInCircle()
-            }
-        }
+    fun resetStoryOverride() {
+        storySkin = null
+        storyRandomColors = null
+        storySpeedMult = 1f
+        storyBgSignal = 0L
+        lastStoryMilestone = 0
     }
 
     LaunchedEffect(noSound) {
-        if (noSound) {
-            currentPlayer?.pause()
-        } else {
-            if (currentPlayer != null && !currentPlayer!!.isPlaying) {
-                currentPlayer?.start()
-            }
-        }
+        if (noSound) musicManager.pause() else musicManager.resume(noSound = false)
     }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE) {
-                currentPlayer?.pause()
-            } else if (event == Lifecycle.Event.ON_RESUME) {
-                if (currentPlayer != null && !noSound) currentPlayer?.start()
-            }
+            if (event == Lifecycle.Event.ON_PAUSE) musicManager.pause()
+            else if (event == Lifecycle.Event.ON_RESUME) musicManager.resume(noSound)
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(observer)
-            currentPlayer?.release()
+            musicManager.stop()
         }
     }
 
@@ -146,23 +104,53 @@ fun MainAppRouter() {
                     MenuScreen(
                         isDarkTheme = isDarkTheme,
                         highScore = highScore,
-                        onPlayClick = { currentScreen = Screen.GAME },
+                        isFallingBgEnabled = isFallingBgEnabled,
+                        fallingBgSpeed = fallingBgSpeed,
+                        onPlayClick = {
+                            resetStoryOverride()
+                            currentScreen = Screen.GAME
+                        },
                         onSettingsClick = { showSettings = true },
                         onAuthorsClick = { showAuthors = true },
-                        onHighScoreClick = { showStats = true } // Передаем клик
+                        onHighScoreClick = { showStats = true }
                     )
                 }
                 Screen.GAME -> {
                     BlockBlastGame(
-                        isRandomColor = isRandomColor,
+                        storage = storage,
+                        isRandomColor = effectiveRandomColor,
                         isDarkTheme = isDarkTheme,
                         isRandomBg = isRandomBg,
                         isTrayAnimEnabled = isTrayAnimEnabled,
                         isFallingBgEnabled = isFallingBgEnabled,
                         noSound = noSound,
-                        onToggleSound = { noSound = !noSound; prefs.edit().putBoolean("no_sound", noSound).apply() },
-                        onScoreUpdated = { newScore -> checkAndPlayMusic(newScore) },
-                        onGameReset = { triggeredMilestones = emptySet() },
+                        blockSkin = effectiveSkin,
+                        startMode = startMode,
+                        isEndlessMode = isEndlessMode,
+                        fallingBgSpeedMult = effectiveFallingSpeedMult,
+                        storyBgSignal = storyBgSignal,
+                        onToggleSound = {
+                            noSound = !noSound
+                            storage.noSound = noSound
+                        },
+                        onScoreUpdated = { newScore ->
+                            musicManager.checkAndPlayForScore(newScore, noSound)
+                            if (isStoryMode && newScore >= 50) {
+                                val currentMilestone = newScore / 50
+                                while (lastStoryMilestone < currentMilestone) {
+                                    lastStoryMilestone++
+                                    val skins = BlockSkin.values()
+                                    storySkin = skins[lastStoryMilestone % skins.size]
+                                    storyRandomColors = !(storyRandomColors ?: isRandomColor)
+                                    storySpeedMult = 0.5f + Random.nextFloat() * 1.5f
+                                    storyBgSignal++
+                                }
+                            }
+                        },
+                        onGameReset = {
+                            musicManager.resetMilestones()
+                            resetStoryOverride()
+                        },
                         onBackToMenu = { currentScreen = Screen.MENU }
                     )
                 }
@@ -172,16 +160,30 @@ fun MainAppRouter() {
 
     if (showSettings) {
         SettingsDialog(
-            isRandomColor = isRandomColor, isDarkTheme = isDarkTheme, noSound = noSound, isRandomBg = isRandomBg,
-            isTrayAnimEnabled = isTrayAnimEnabled, isFallingBgEnabled = isFallingBgEnabled,
-            currentTrackNumber = if (currentTrackIndex == -1) 0 else currentTrackIndex + 1,
-            onRandomColorChange = { newValue -> isRandomColor = newValue; prefs.edit().putBoolean("random_color", newValue).apply() },
-            onThemeChange = { newValue -> isDarkTheme = newValue; prefs.edit().putBoolean("dark_theme", newValue).apply() },
-            onSoundChange = { newValue -> noSound = newValue; prefs.edit().putBoolean("no_sound", newValue).apply() },
-            onRandomBgChange = { newValue -> isRandomBg = newValue; prefs.edit().putBoolean("random_bg", newValue).apply() },
-            onTrayAnimChange = { newValue -> isTrayAnimEnabled = newValue; prefs.edit().putBoolean("tray_anim", newValue).apply() },
-            onFallingBgChange = { newValue -> isFallingBgEnabled = newValue; prefs.edit().putBoolean("falling_bg", newValue).apply() },
-            onNextMusicClick = { playNextTrackInCircle() },
+            isRandomColor = isRandomColor,
+            isDarkTheme = isDarkTheme,
+            noSound = noSound,
+            isRandomBg = isRandomBg,
+            isTrayAnimEnabled = isTrayAnimEnabled,
+            isFallingBgEnabled = isFallingBgEnabled,
+            blockSkin = blockSkin,
+            startMode = startMode,
+            isStoryMode = isStoryMode,
+            isEndlessMode = isEndlessMode,
+            fallingBgSpeed = fallingBgSpeed,
+            currentTrackNumber = musicManager.currentTrackNumber,
+            onRandomColorChange = { v -> isRandomColor = v; storage.isRandomColor = v },
+            onThemeChange = { v -> isDarkTheme = v; storage.isDarkTheme = v },
+            onSoundChange = { v -> noSound = v; storage.noSound = v },
+            onRandomBgChange = { v -> isRandomBg = v; storage.isRandomBg = v },
+            onTrayAnimChange = { v -> isTrayAnimEnabled = v; storage.isTrayAnimEnabled = v },
+            onFallingBgChange = { v -> isFallingBgEnabled = v; storage.isFallingBgEnabled = v },
+            onFallingBgSpeedChange = { v -> fallingBgSpeed = v; storage.fallingBgSpeed = v },
+            onBlockSkinChange = { v -> blockSkin = v; storage.blockSkin = v },
+            onStartModeChange = { v -> startMode = v; storage.startMode = v },
+            onStoryModeChange = { v -> isStoryMode = v; storage.isStoryMode = v },
+            onEndlessModeChange = { v -> isEndlessMode = v; storage.isEndlessMode = v },
+            onNextMusicClick = { musicManager.playNextTrack(noSound) },
             onDismiss = { showSettings = false }
         )
     }
@@ -190,12 +192,12 @@ fun MainAppRouter() {
         AuthorsDialog(isDarkTheme = isDarkTheme, onDismiss = { showAuthors = false })
     }
 
-    // НОВЫЙ ДИАЛОГ СТАТИСТИКИ
     if (showStats) {
         StatsDialog(
             isDarkTheme = isDarkTheme,
             bestScoreRevive = bestScoreRevive,
             bestScoreNoRevive = bestScoreNoRevive,
+            bestScoreEndless = bestScoreEndless,
             totalRevives = totalRevives,
             totalPlayTime = totalPlayTime,
             onDismiss = { showStats = false }
